@@ -142,31 +142,85 @@ class LeafNode extends BPlusNode {
     // See BPlusNode.get.
     @Override
     public LeafNode get(DataBox key) {
-        // TODO(proj2): implement
-
-        return null;
+        return this;
     }
 
     // See BPlusNode.getLeftmostLeaf.
     @Override
     public LeafNode getLeftmostLeaf() {
-        // TODO(proj2): implement
-
-        return null;
+        return this;
     }
 
     // See BPlusNode.put.
     @Override
     public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) {
-        // TODO(proj2): implement
+        // B+ trees in CS186 course don't support duplicate entries.
+        if (keys.contains(key)) {
+            throw new BPlusTreeException("Failed to put a duplicate key into leaf node.");
+        }
 
-        return Optional.empty();
+        int index = numLessThan(key, keys);
+        keys.add(index, key);
+        rids.add(index, rid);
+        if (!isOverflow()) {
+            sync();
+            return Optional.empty();
+        }
+
+        // `d` is the order of tree.
+        int d = metadata.getOrder();
+        // When the leaf splits, it returns the first entry in the right node as the split key.
+        // `d` entries remain in the left node; `d + 1` entries are moved to the right node.
+        //
+        // Overflow - the right node.
+        List<DataBox> rightKeys = keys.subList(d, 2 * d + 1);
+        List<RecordId> rightRids = rids.subList(d, 2 * d + 1);
+        DataBox splitKey = rightKeys.get(0);
+        LeafNode node = new LeafNode(metadata, bufferManager, rightKeys, rightRids, rightSibling, treeContext);
+        long pageNum = node.getPage().getPageNum();
+
+        // Overflow - the left node.
+        // Remain the [0, d) keys.
+        keys.subList(d, 2 * d + 1).clear();
+        rids.subList(d, 2 * d + 1).clear();
+        rightSibling = Optional.of(pageNum);
+        sync();
+
+        return Optional.of(new Pair<>(splitKey, pageNum));
     }
 
     // See BPlusNode.bulkLoad.
     @Override
     public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data, float fillFactor) {
         // TODO(proj2): implement
+        while (data.hasNext() && !isOverflow(fillFactor)) {
+            Pair<DataBox, RecordId> cur = data.next();
+            DataBox key = cur.getFirst();
+            RecordId rid = cur.getSecond();
+            if (keys.contains(key)) {
+                throw new BPlusTreeException("Failed to put a duplicate key into leaf node.");
+            }
+
+            int index = numLessThan(key, keys);
+            keys.add(index, key);
+            rids.add(index, rid);
+        }
+
+        // Overflow - splits by creating a right sibling that contains just one record
+        // (leaving the original node with the desired fill factor).
+        while (data.hasNext()) {
+            int size = keys.size();
+            List<DataBox> rightKeys = new ArrayList<>();
+            List<RecordId> rightRids = new ArrayList<>();
+            rightKeys.add(keys.remove(size - 1));
+            rightRids.add(rids.remove(size - 1));
+            LeafNode node = new LeafNode(metadata, bufferManager, rightKeys, rightRids, rightSibling, treeContext);
+            long pageNum = node.getPage().getPageNum();
+
+            rightSibling = Optional.of(pageNum);
+            sync();
+
+        }
 
         return Optional.empty();
     }
@@ -174,9 +228,14 @@ class LeafNode extends BPlusNode {
     // See BPlusNode.remove.
     @Override
     public void remove(DataBox key) {
-        // TODO(proj2): implement
+        int index = Collections.binarySearch(keys, key);
+        if (index == -1) {
+            return;
+        }
 
-        return;
+        keys.remove(index);
+        rids.remove(index);
+        sync();
     }
 
     // Iterators ///////////////////////////////////////////////////////////////
@@ -286,6 +345,18 @@ class LeafNode extends BPlusNode {
         return n / 2;
     }
 
+    static <T extends Comparable<T>> int numLessThan(T x, List<T> ys) {
+        int n = 0;
+        for (T y : ys) {
+            if (y.compareTo(x) < 0) {
+                ++n;
+            } else {
+                break;
+            }
+        }
+        return n;
+    }
+
     // Pretty Printing /////////////////////////////////////////////////////////
     @Override
     public String toString() {
@@ -382,7 +453,13 @@ class LeafNode extends BPlusNode {
         assert (nodeType == (byte) 1);
 
         // Get the right sibling.
-        Optional<Long> rightSibling = Optional.of(buf.getLong());
+        long rightLong = buf.getLong();
+        Optional<Long> rightSibling;
+        if (rightLong == -1L) {
+            rightSibling = Optional.empty();
+        } else {
+            rightSibling = Optional.of(rightLong);
+        }
 
         // Get the keys and rids.
         List<DataBox> keys = new ArrayList<>();
@@ -393,6 +470,14 @@ class LeafNode extends BPlusNode {
             rids.add(RecordId.fromBytes(buf));
         }
         return new LeafNode(metadata, bufferManager, page, keys, rids, rightSibling, treeContext);
+    }
+
+    private boolean isOverflow() {
+        return keys.size() > 2 * metadata.getOrder();
+    }
+
+    private boolean isOverflow(float fillFactor) {
+        return keys.size() >= Math.ceil(fillFactor * 2 * metadata.getOrder());
     }
 
     // Builtins ////////////////////////////////////////////////////////////////
