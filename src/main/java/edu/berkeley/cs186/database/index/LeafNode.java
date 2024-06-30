@@ -185,15 +185,14 @@ class LeafNode extends BPlusNode {
         rids.subList(d, 2 * d + 1).clear();
         rightSibling = Optional.of(pageNum);
         sync();
-
         return Optional.of(new Pair<>(splitKey, pageNum));
     }
 
     // See BPlusNode.bulkLoad.
     @Override
     public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data, float fillFactor) {
-        // TODO(proj2): implement
-        while (data.hasNext() && !isOverflow(fillFactor)) {
+        int d = metadata.getOrder();
+        while (data.hasNext() && keys.size() <= Math.ceil(fillFactor * 2 * d)) {
             Pair<DataBox, RecordId> cur = data.next();
             DataBox key = cur.getFirst();
             RecordId rid = cur.getSecond();
@@ -206,23 +205,26 @@ class LeafNode extends BPlusNode {
             rids.add(index, rid);
         }
 
-        // Overflow - splits by creating a right sibling that contains just one record
-        // (leaving the original node with the desired fill factor).
-        while (data.hasNext()) {
-            int size = keys.size();
-            List<DataBox> rightKeys = new ArrayList<>();
-            List<RecordId> rightRids = new ArrayList<>();
-            rightKeys.add(keys.remove(size - 1));
-            rightRids.add(rids.remove(size - 1));
-            LeafNode node = new LeafNode(metadata, bufferManager, rightKeys, rightRids, rightSibling, treeContext);
-            long pageNum = node.getPage().getPageNum();
-
-            rightSibling = Optional.of(pageNum);
+        // If the leaf node isn't overflowed, return empty.
+        if (!data.hasNext()) {
             sync();
-
+            return Optional.empty();
         }
 
-        return Optional.empty();
+        // Overflow - splits by creating a right sibling that contains just one record
+        // (leaving the original node with the desired fill factor).
+        int size = keys.size();
+        List<DataBox> rightKeys = new ArrayList<>();
+        List<RecordId> rightRids = new ArrayList<>();
+        rightKeys.add(keys.remove(size - 1));
+        rightRids.add(rids.remove(size - 1));
+        DataBox splitKey = rightKeys.get(0);
+        LeafNode node = new LeafNode(metadata, bufferManager, rightKeys, rightRids, rightSibling, treeContext);
+        long pageNum = node.getPage().getPageNum();
+
+        rightSibling = Optional.of(pageNum);
+        sync();
+        return Optional.of(new Pair<>(splitKey, pageNum));
     }
 
     // See BPlusNode.remove.
@@ -476,6 +478,12 @@ class LeafNode extends BPlusNode {
         return keys.size() > 2 * metadata.getOrder();
     }
 
+    /**
+     * Check if the leaf node is overflowed with the given fill factor.
+     *
+     * @param fillFactor the fill factor of the B+ tree.
+     * @return true if the leaf node is overflowed, false otherwise.
+     */
     private boolean isOverflow(float fillFactor) {
         return keys.size() >= Math.ceil(fillFactor * 2 * metadata.getOrder());
     }
